@@ -442,9 +442,7 @@ class PatchEmbeddingBlock(nn.Module):
                 Rearrange(f"{from_chars} -> {to_chars}", **axes_len), nn.Linear(self.patch_dim, hidden_size)
             )
 
-        # Make EHR projection robust to varying clinical feature counts.
-        # The layer will infer input dimension on first forward pass.
-        self.EHR_proj = nn.Sequential(nn.LazyLinear(hidden_size))
+        self.EHR_proj = nn.Sequential(nn.Linear(n_clin_var, hidden_size))
 
         self.position_embeddings = nn.Parameter(torch.zeros(1, self.n_patches, hidden_size))
         self.cls_token = nn.Parameter(torch.zeros(1, 1, hidden_size))
@@ -482,6 +480,19 @@ class PatchEmbeddingBlock(nn.Module):
         x = self.patch_embeddings(img)
 
         # print(x.shape)
+        # Keep compatibility when clinical feature count != n_clin_var.
+        if clin_var.dim() == 1:
+            clin_var = clin_var.unsqueeze(0)
+        if clin_var.shape[1] < n_clin_var:
+            pad = torch.zeros(
+                clin_var.shape[0],
+                n_clin_var - clin_var.shape[1],
+                device=clin_var.device,
+                dtype=clin_var.dtype,
+            )
+            clin_var = torch.cat([clin_var, pad], dim=1)
+        elif clin_var.shape[1] > n_clin_var:
+            clin_var = clin_var[:, :n_clin_var]
 
         clin_var = self.EHR_proj(clin_var)
         # print(clin_var.shape)
