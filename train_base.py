@@ -188,7 +188,18 @@ class Trainer:
             with torch.cuda.amp.autocast(enabled=(self.args.amp and self.device.type == 'cuda')):
                 cls = self.model(img, clinical)[-1]
                 if self.args.num_classes > 2:
-                    loss = self.loss_function(cls, label.long().view(-1))
+                    y = label.long().view(-1)
+                    if cls.dim() != 2:
+                        raise ValueError(f"Expected logits shape [B, C] for multiclass, got {tuple(cls.shape)}")
+                    c = cls.size(1)
+                    y_min = int(y.min().item())
+                    y_max = int(y.max().item())
+                    if y_min < 0 or y_max >= c:
+                        raise ValueError(
+                            f"Label index out of range: label range [{y_min}, {y_max}] but model has C={c}. "
+                            f"Set --num-classes correctly or check Histology mapping."
+                        )
+                    loss = self.loss_function(cls, y)
                 else:
                     loss = self.loss_function(cls, label)
                 loss_for_backward = loss / self.args.accumulation_steps
@@ -227,7 +238,18 @@ class Trainer:
                 # pred = torch.sigmoid(cls)
 
                 if self.args.num_classes > 2:
-                    loss_val = self.loss_function(cls, label.long().view(-1))
+                    y = label.long().view(-1)
+                    if cls.dim() != 2:
+                        raise ValueError(f"Expected logits shape [B, C] for multiclass, got {tuple(cls.shape)}")
+                    c = cls.size(1)
+                    y_min = int(y.min().item())
+                    y_max = int(y.max().item())
+                    if y_min < 0 or y_max >= c:
+                        raise ValueError(
+                            f"Label index out of range: label range [{y_min}, {y_max}] but model has C={c}. "
+                            f"Set --num-classes correctly or check Histology mapping."
+                        )
+                    loss_val = self.loss_function(cls, y)
                 else:
                     loss_val = self.loss_function(cls, label)
                 # dice_loss_val = self.dice_loss(seg, mask)
@@ -323,6 +345,11 @@ def main(args, path):
     infos_name = dataset['infos_name']
     filter_volume = dataset.get('filter_volume', 0.0)
     train_info, val_info = split_data(data_dir, infos_name, filter_volume, rate=0.8, seed=args.seed)
+    if train_info:
+        detected_num_classes = len(set(int(x["label"]) for x in train_info))
+        if detected_num_classes > 1 and args.num_classes != detected_num_classes:
+            print(f"[Info] Detected {detected_num_classes} classes from metadata. Overriding --num-classes={args.num_classes}.")
+            args.num_classes = detected_num_classes
     train_loader = my_dataloader(data_dir,
                                       train_info,
                                       batch_size=args.batch_size,
