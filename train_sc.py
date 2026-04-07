@@ -108,15 +108,14 @@ def main(args):
                                       batch_size=args.batch_size,
                                       shuffle=True,
                                       num_workers=args.num_workers,
-                                      input_size=args.input_size,
-                                      task=[0, 1])
+                                      phase='train')
     test_data_loader = my_dataloader(args.input_path,
                                      val_info,
                                      batch_size=args.batch_size,
                                      shuffle=False,
                                      num_workers=args.num_workers,
-                                     input_size=args.input_size,
-                                     task=[0, 1])
+                                     phase='val',
+                                     clinical_preprocessor=getattr(train_data_loader.dataset, "clinical_preprocessor", None))
 
     print("Start training")
     running_loss = AverageMeter()
