@@ -8,6 +8,7 @@ import argparse
 import json
 import re
 import ast
+import importlib
 import torch.nn.functional as F
 import monai.losses
 from monai.bundle import ConfigParser
@@ -22,6 +23,11 @@ from src.dataloader.load_data import split_data, my_dataloader
 from torch.nn import DataParallel
 import itertools
 import functools
+
+def resolve_dotted_callable(path):
+    module_name, attr_name = path.rsplit(".", 1)
+    module = importlib.import_module(module_name)
+    return getattr(module, attr_name)
 
 
 def main(args):
@@ -88,7 +94,7 @@ def main(args):
             metrics_cla[k.func.__name__] = k
         elif type(k) == str:  # func
             name = k.split('.')[-1]
-            metrics_cla[name] = eval(k)
+            metrics_cla[name] = resolve_dotted_callable(k)
         else:
             metrics_cla[k.__class__.__name__] = k
     # data
