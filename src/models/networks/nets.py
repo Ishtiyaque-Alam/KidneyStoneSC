@@ -442,7 +442,9 @@ class PatchEmbeddingBlock(nn.Module):
                 Rearrange(f"{from_chars} -> {to_chars}", **axes_len), nn.Linear(self.patch_dim, hidden_size)
             )
 
-        self.EHR_proj = nn.Sequential(nn.Linear(n_clin_var, hidden_size))
+        # Make EHR projection robust to varying clinical feature counts.
+        # The layer will infer input dimension on first forward pass.
+        self.EHR_proj = nn.Sequential(nn.LazyLinear(hidden_size))
 
         self.position_embeddings = nn.Parameter(torch.zeros(1, self.n_patches, hidden_size))
         self.cls_token = nn.Parameter(torch.zeros(1, 1, hidden_size))
