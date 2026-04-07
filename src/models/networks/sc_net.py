@@ -116,7 +116,7 @@ class SC_Net(nn.Module):
         self.hidden_size = hidden_size
         self.classification = False
         self._deep_supervision = deep_supervision
-        self.vit = ViT(
+        vit_kwargs = dict(
             in_channels=in_channels,
             img_size=img_size,
             patch_size=self.patch_size,
@@ -124,11 +124,16 @@ class SC_Net(nn.Module):
             mlp_dim=mlp_dim,
             num_layers=self.num_layers,
             num_heads=num_heads,
-            pos_embed=pos_embed,
             classification=self.classification,
             dropout_rate=dropout_rate,
             spatial_dims=spatial_dims,
         )
+        # MONAI API compatibility: older versions use "pos_embed",
+        # newer versions use "proj_type".
+        try:
+            self.vit = ViT(pos_embed=pos_embed, **vit_kwargs)
+        except TypeError:
+            self.vit = ViT(proj_type=pos_embed, **vit_kwargs)
 
         self.resencoder = generate_model(10)
         # skip upsample
