@@ -79,7 +79,7 @@ def _load_image_or_series(path_like):
     raise FileNotFoundError(f"Path does not exist: {path_like}")
 
 def build_infos_from_metadata_csv(data_dir, metadata_name):
-    cfg_path = os.path.join('configs', 'dataset.json')
+    cfg_path = '/kaggle/working/KidneyStoneSC/configs/dataset.json'
     with open(cfg_path, 'r', encoding='utf-8') as f:
         cfg = json.load(f)
     metadata_path = os.path.join(data_dir, metadata_name)
