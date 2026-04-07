@@ -98,7 +98,11 @@ def main(args):
         else:
             metrics_cla[k.__class__.__name__] = k
     # data
-    train_info, val_info = split_data(args.input_path, rate=0.8)
+    with open('configs/dataset.json', 'r', encoding='utf-8') as f:
+        dataset_cfg = json.load(f)
+    infos_name = dataset_cfg.get('infos_name', 'infos.json')
+    filter_volume = dataset_cfg.get('filter_volume', 0.0)
+    train_info, val_info = split_data(args.input_path, infos_name, filter_volume, rate=0.8)
     train_data_loader = my_dataloader(args.input_path,
                                       train_info,
                                       batch_size=args.batch_size,
