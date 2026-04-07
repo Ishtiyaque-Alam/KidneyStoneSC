@@ -14,7 +14,7 @@ import torch
 
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
-from src.models.net import SC_Net
+from src.models.networks.sc_net import SC_Net
 from src.models.resnet import generate_model
 from utils import AverageMeter, load_pretrain
 from src.dataloader.load_data import split_data, my_dataloader
