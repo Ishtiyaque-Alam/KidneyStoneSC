@@ -10,6 +10,7 @@
   "metadata_ct_col": "ct_path",
   "metadata_seg_col": "seg_path",
   "metadata_source_prefix": "/kaggle/input/datasets/umutkrdrms/nsclc-radiomics/NSCLC-Radiomics",
+  "target_size": [96, 96, 96],
   "clinical_features": [
     "age",
     "clinical.T.Stage",

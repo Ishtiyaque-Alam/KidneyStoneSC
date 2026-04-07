@@ -7,6 +7,7 @@ import os
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 import json
 import SimpleITK as sitk
@@ -349,6 +350,7 @@ class MyDataset(Dataset):
         self.seg_paths = [i.get('seg_path') for i in infos]
         self.phase = phase
         self.labels = torch.tensor(self.labels, dtype=torch.float)
+        self.target_size = tuple(config.get("target_size", [96, 96, 96]))
 
     def _prepare_clinical_map(self, clinical_df):
         df = clinical_df.copy()
@@ -418,6 +420,19 @@ class MyDataset(Dataset):
             img, mask = self.val_preprocess(img, mask)
         img = torch.tensor(img, dtype=torch.float32).unsqueeze(0)
         mask = torch.tensor(mask, dtype=torch.uint8).unsqueeze(0)
+        # Resize large DICOM volumes to a fixed tensor size for stable GPU memory usage.
+        if self.target_size:
+            img = F.interpolate(
+                img.unsqueeze(0),
+                size=self.target_size,
+                mode="trilinear",
+                align_corners=False
+            ).squeeze(0)
+            mask = F.interpolate(
+                mask.unsqueeze(0).float(),
+                size=self.target_size,
+                mode="nearest"
+            ).squeeze(0).to(torch.uint8)
         label = self.labels[i].unsqueeze(0)
 
         if self.use_clinical and self.clinical_dim > 0:
