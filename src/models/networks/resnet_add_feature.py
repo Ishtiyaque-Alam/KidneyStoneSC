@@ -145,7 +145,9 @@ class ResNetAdd(nn.Module):
 
         self.avgpool = nn.AdaptiveAvgPool3d((1, 1, 1))
 
-        self.bn2 = nn.BatchNorm1d(block_inplanes[3] * block.expansion + n_input_features)
+        # BatchNorm1d fails when batch_size == 1 during training.
+        # LayerNorm is stable for small effective batch sizes.
+        self.bn2 = nn.LayerNorm(block_inplanes[3] * block.expansion + n_input_features)
         self.fc = nn.Linear(block_inplanes[3] * block.expansion + n_input_features, n_classes)  # 在全连接层之前增加新特征维度
 
         self.dropout = nn.Dropout(p=dropout_rate)
