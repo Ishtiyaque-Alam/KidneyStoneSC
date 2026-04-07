@@ -46,23 +46,19 @@ def main(args):
     # [d, h, w] = [int(i) for i in re.findall('\d+',args.input_size)]
     [d, h, w] = [48, 48, 48]
     img_size = (d//16, h//32, w//32)
-    if train_cla:
-        cls_net = generate_model(34)
-        cls_net = load_pretrain(args.pretrain_cls, cls_net)
-
-    if train_seg:
-        seg_net = SC_Net(in_channels=512, out_features=args.num_classes, img_size=img_size, cla=train_cla, seg=train_seg)
-        seg_net = load_pretrain(args.pretrain_seg, seg_net)
+    if not train_seg:
+        raise ValueError("train_sc.py currently requires segmentation path enabled (task includes 0).")
+    sc_net = SC_Net(in_channels=512, out_features=args.num_classes, img_size=img_size, cla=train_cla, seg=train_seg)
+    pretrain_seg = getattr(args, "pretrain_seg", None)
+    sc_net = load_pretrain(pretrain_seg, sc_net)
 
     device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
     if torch.cuda.device_count() > 1:
-        seg_net = DataParallel(seg_net)
-        cls_net = DataParallel(cls_net)
+        sc_net = DataParallel(sc_net)
 
-    seg_net.to(device)
-    cls_net.to(device)
+    sc_net.to(device)
     optimizer = torch.optim.Adam(
-        params=itertools.chain(cls_net.parameters()),
+        params=itertools.chain(sc_net.parameters()),
         lr=args.lr,
         betas=args.betas,
         weight_decay=args.weight_decay
@@ -276,6 +272,8 @@ if __name__ == '__main__':
     parser.add_argument('--config-file', type=str, default='/kaggle/working/KidneyStoneSC/configs/config.yaml')
     parser.add_argument('--task', type=str, default=[0, 1])
     parser.add_argument('--pretrain-sc', type=str, default=None)
+    parser.add_argument('--pretrain-seg', type=str, default=None)
+    parser.add_argument('--pretrain-cls', type=str, default=None)
     parser.add_argument('--input-path', type=str, default='/home/KidneyData/data')
     parser.add_argument('--output-path', type=str, default='./results')
     parser.add_argument('--input-size', type=str, default=(128, 128, 128))
@@ -294,6 +292,8 @@ if __name__ == '__main__':
     parser.add_argument('--num-workers', type=int, default=0)
 
     opt = parser.parse_args()
+    if opt.pretrain_seg is None:
+        opt.pretrain_seg = opt.pretrain_sc
     args_dict = vars(opt)
 
     # 将参数字典保存为 JSON 文件
