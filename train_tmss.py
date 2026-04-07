@@ -105,6 +105,8 @@ class Trainer:
         self.loss_function = torch.nn.CrossEntropyLoss() if self.is_multiclass else torch.nn.BCELoss()
         self.summaryWriter = summaryWriter
         self.use_clip = args.clinical
+        self.use_amp = bool(getattr(args, "amp", False)) and self.device.type == "cuda"
+        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
         self.dice_loss = DiceLoss(sigmoid=True)
         self.dice_metric = DiceMetric(include_background=False, reduction="mean", get_not_nans=False)
         self.self_model()
@@ -136,6 +138,9 @@ class Trainer:
                             checkpoint_path=self.args.MODEL_WEIGHT,
                             multi_gpu=torch.cuda.device_count() > 1)
             print('load model weight success!')
+        elif torch.cuda.is_available() and torch.cuda.device_count() > 1:
+            self.model = nn.DataParallel(self.model)
+            print(f"Using DataParallel with {torch.cuda.device_count()} GPUs.")
         self.model.to(self.device)
 
     def calculate_metrics(self, pred, label, seg, mask):
@@ -202,22 +207,26 @@ class Trainer:
         }
         end_time = time.time()
         for inx, (img, mask, label, clinical) in tqdm(enumerate(self.train_loader), total=len(self.train_loader)):
-            img, label, clinical, mask = img.to(self.device), label.to(self.device), clinical.to(self.device), mask.to(
-                self.device)
+            img = img.to(self.device, non_blocking=True)
+            label = label.to(self.device, non_blocking=True)
+            clinical = clinical.to(self.device, non_blocking=True)
+            mask = mask.to(self.device, non_blocking=True)
             if not self.use_clip:
                 clinical = torch.zeros_like(clinical)
-            seg, cls = self.model([img, clinical])
-            if self.is_multiclass:
-                cls_loss = self.loss_function(cls, label.long().view(-1))
-                pred_for_metrics = cls
-            else:
-                pred_for_metrics = torch.sigmoid(cls)
-                cls_loss = self.loss_function(pred_for_metrics, label)
-            dice_loss = self.dice_loss(seg, mask)
-            loss = self.loss_weight[0] * cls_loss + self.loss_weight[1] * dice_loss
-            self.optimizer.zero_grad()
-            loss.backward()
-            self.optimizer.step()
+            self.optimizer.zero_grad(set_to_none=True)
+            with torch.cuda.amp.autocast(enabled=self.use_amp):
+                seg, cls = self.model([img, clinical])
+                if self.is_multiclass:
+                    cls_loss = self.loss_function(cls, label.long().view(-1))
+                    pred_for_metrics = cls
+                else:
+                    pred_for_metrics = torch.sigmoid(cls)
+                    cls_loss = self.loss_function(pred_for_metrics, label)
+                dice_loss = self.dice_loss(seg, mask)
+                loss = self.loss_weight[0] * cls_loss + self.loss_weight[1] * dice_loss
+            self.scaler.scale(loss).backward()
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
 
             acc, precision_val, recall_val, f1_score_val, dice = self.calculate_metrics(pred_for_metrics, label, seg, mask)
             self.update_meters(
@@ -247,20 +256,22 @@ class Trainer:
 
         with torch.no_grad():  # 禁用梯度计算
             for inx, (img, mask, label, clinical) in tqdm(enumerate(self.test_loader), total=len(self.test_loader)):
-                img, label, clinical, mask = img.to(self.device), label.to(self.device), clinical.to(
-                    self.device), mask.to(self.device)
+                img = img.to(self.device, non_blocking=True)
+                label = label.to(self.device, non_blocking=True)
+                clinical = clinical.to(self.device, non_blocking=True)
+                mask = mask.to(self.device, non_blocking=True)
                 if not self.use_clip:
                     clinical = torch.zeros_like(clinical)
-
-                seg, cls = self.model([img, clinical])
-                if self.is_multiclass:
-                    pred_for_metrics = cls
-                    cls_loss_val = self.loss_function(cls, label.long().view(-1))
-                else:
-                    pred_for_metrics = torch.sigmoid(cls)
-                    cls_loss_val = self.loss_function(pred_for_metrics, label)
-                dice_loss_val = self.dice_loss(seg, mask)
-                total_loss_val = self.loss_weight[0] * cls_loss_val + self.loss_weight[1] * dice_loss_val
+                with torch.cuda.amp.autocast(enabled=self.use_amp):
+                    seg, cls = self.model([img, clinical])
+                    if self.is_multiclass:
+                        pred_for_metrics = cls
+                        cls_loss_val = self.loss_function(cls, label.long().view(-1))
+                    else:
+                        pred_for_metrics = torch.sigmoid(cls)
+                        cls_loss_val = self.loss_function(pred_for_metrics, label)
+                    dice_loss_val = self.dice_loss(seg, mask)
+                    total_loss_val = self.loss_weight[0] * cls_loss_val + self.loss_weight[1] * dice_loss_val
 
                 acc, precision_val, recall_val, f1_score_val, dice_val = self.calculate_metrics(pred_for_metrics, label, seg, mask)
 
@@ -314,6 +325,8 @@ def makedirs(path):
 def main(args, path):
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    if device.type == 'cuda':
+        torch.backends.cudnn.benchmark = True
     print("can use {} gpus".format(torch.cuda.device_count()))
     print(device)
     # data
@@ -348,14 +361,20 @@ def main(args, path):
                                       batch_size=args.batch_size,
                                       shuffle=True,
                                       num_workers=args.num_workers,
-                                      phase='train')
+                                      phase='train',
+                                      pin_memory=device.type == "cuda",
+                                      persistent_workers=args.num_workers > 0,
+                                      prefetch_factor=args.prefetch_factor)
     val_loader = my_dataloader(data_dir,
                                      val_info,
                                      batch_size=args.batch_size,
                                      shuffle=False,
                                      num_workers=args.num_workers,
                                      phase='val',
-                                     clinical_preprocessor=getattr(train_loader.dataset, "clinical_preprocessor", None))
+                                     clinical_preprocessor=getattr(train_loader.dataset, "clinical_preprocessor", None),
+                                     pin_memory=device.type == "cuda",
+                                     persistent_workers=args.num_workers > 0,
+                                     prefetch_factor=args.prefetch_factor)
     summaryWriter = None
     if args.phase == 'train':
 
@@ -385,7 +404,9 @@ if __name__ == '__main__':
     parser.add_argument('--log_interval', type=int, default=1)
     parser.add_argument('--save-epoch', type=int, default=10)
     parser.add_argument('--num-workers', type=int, default=0)
+    parser.add_argument('--prefetch-factor', type=int, default=2)
     parser.add_argument('--clinical', type=int, default=1)
+    parser.add_argument('--amp', type=int, default=1)
     parser.add_argument('--MODEL-WEIGHT', type=str, default=None)
     parser.add_argument('--phase', type=str, default='train')
     parser.add_argument('--loss_weight', type=str, default='[0.5, 0.5]')
@@ -393,6 +414,7 @@ if __name__ == '__main__':
     opt = parser.parse_args()
     args_dict = vars(opt)
     args_dict['clinical'] = True if args_dict['clinical'] ==1 else False
+    args_dict['amp'] = True if args_dict['amp'] == 1 else False
     now = time.strftime('%y%m%d%H%M', time.localtime())
     path = None
     if opt.phase == 'train':

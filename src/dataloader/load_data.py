@@ -488,9 +488,29 @@ class MyDataset(Dataset):
         return (img - min) / (max - min)
 
 
-def my_dataloader(data_dir, infos, batch_size=1, shuffle=True, num_workers=0, phase='train', clinical_preprocessor=None):
+def my_dataloader(
+    data_dir,
+    infos,
+    batch_size=1,
+    shuffle=True,
+    num_workers=0,
+    phase='train',
+    clinical_preprocessor=None,
+    pin_memory=False,
+    persistent_workers=False,
+    prefetch_factor=2,
+):
     dataset = MyDataset(data_dir, infos, phase=phase, clinical_preprocessor=clinical_preprocessor)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
+    loader_kwargs = dict(
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=(persistent_workers and num_workers > 0),
+    )
+    if num_workers > 0:
+        loader_kwargs["prefetch_factor"] = prefetch_factor
+    dataloader = DataLoader(dataset, **loader_kwargs)
     return dataloader
 
 if __name__ == '__main__':
