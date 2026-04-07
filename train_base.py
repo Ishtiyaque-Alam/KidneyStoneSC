@@ -5,32 +5,21 @@
 
 import warnings
 
-import pandas as pd
-
 warnings.filterwarnings("ignore")
-import logging  # 引入logging模块
 import os.path
 import time
 import os
-import math
 import argparse
 
-import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
-import torch.optim.lr_scheduler as lr_scheduler
 from tqdm import tqdm
 import torch
-from torch.optim.lr_scheduler import ExponentialLR
 import torch.nn as nn
 from src.dataloader.load_data import split_data, my_dataloader
-from torch.nn.parallel import DataParallel
-from src.models.networks.resnet import generate_model
-import time
+from src.models.networks.resnet_add_feature import generate_model
 import json
-import torch.nn.functional as F
 from utils import AverageMeter2 as AverageMeter
-from utils import calculate_acc_sigmoid
-from sklearn.metrics import precision_score, recall_score, f1_score, roc_auc_score, accuracy_score
+from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score
 
 
 def load_model(model, checkpoint_path, multi_gpu=False):
@@ -75,9 +64,15 @@ class Trainer:
         self.best_acc = 0
         self.best_acc_epoch = 0
         self.args = args
-        self.loss_function = torch.nn.BCEWithLogitsLoss()
+        if args.num_classes > 2:
+            self.loss_function = torch.nn.CrossEntropyLoss()
+        else:
+            self.loss_function = torch.nn.BCEWithLogitsLoss()
         self.summaryWriter = summaryWriter
-        self.use_clip = False
+        self.scaler = torch.cuda.amp.GradScaler(enabled=(args.amp and self.device.type == 'cuda'))
+        self.best_score = float('-inf')
+        self.best_score_epoch = 0
+        self.no_improve_epochs = 0
         self.self_model()
 
     def __call__(self):
@@ -91,7 +86,14 @@ class Trainer:
                 end = time.time()
                 print("Epoch: {}, train time: {}".format(epoch, end - start))
                 if epoch % 1 == 0:
-                    self.evaluate()
+                    improved = self.evaluate()
+                    if improved:
+                        self.no_improve_epochs = 0
+                    else:
+                        self.no_improve_epochs += 1
+                    if self.no_improve_epochs >= self.args.early_stop_patience:
+                        print(f"Early stopping at epoch {self.epoch} (no improvement for {self.no_improve_epochs} evals).")
+                        break
         else:
             self.evaluate()
 
@@ -105,22 +107,37 @@ class Trainer:
 
     def calculate_metrics(self, pred, label):
         with torch.no_grad():
-            pred = torch.sigmoid(pred)
-            pred = (pred > 0.5).float()
-            acc = accuracy_score(label, pred)
-            precision = precision_score(label, pred)
-            recall = recall_score(label, pred)
-            f1 = f1_score(label, pred)
+            if self.args.num_classes > 2:
+                pred_cls = torch.softmax(pred, dim=1).argmax(dim=1)
+                acc = accuracy_score(label, pred_cls)
+                precision = precision_score(label, pred_cls, average="macro", zero_division=0)
+                recall = recall_score(label, pred_cls, average="macro", zero_division=0)
+                f1 = f1_score(label, pred_cls, average="macro", zero_division=0)
+            else:
+                pred = torch.sigmoid(pred)
+                pred = (pred > 0.5).float()
+                acc = accuracy_score(label, pred)
+                precision = precision_score(label, pred, zero_division=0)
+                recall = recall_score(label, pred, zero_division=0)
+                f1 = f1_score(label, pred, zero_division=0)
             return acc, precision, recall, f1
     def calculate_all_metrics(self, pred, label):
+        if self.args.num_classes > 2:
+            pred = torch.tensor(pred)
+            pred_cls = torch.softmax(pred, dim=1).argmax(dim=1)
+            label = torch.tensor(label).long()
+            acc = accuracy_score(label, pred_cls)
+            precision = precision_score(label, pred_cls, average="macro", zero_division=0)
+            recall = recall_score(label, pred_cls, average="macro", zero_division=0)
+            f1 = f1_score(label, pred_cls, average="macro", zero_division=0)
+            return acc, precision, recall, f1, 0.0
         pred = torch.sigmoid(torch.tensor(pred))
         pred = (pred > 0.5).float()
         acc = accuracy_score(label, pred)
-        precision = precision_score(label, pred)
-        recall = recall_score(label, pred)
-        f1 = f1_score(label, pred)
-        auc = roc_auc_score(label, pred)
-        return acc, precision, recall, f1, auc
+        precision = precision_score(label, pred, zero_division=0)
+        recall = recall_score(label, pred, zero_division=0)
+        f1 = f1_score(label, pred, zero_division=0)
+        return acc, precision, recall, f1, 0.0
 
     def get_meters(self):
         meters = {
@@ -164,14 +181,25 @@ class Trainer:
         meters = self.get_meters()
         all_preds = []
         all_labels = []
+        self.optimizer.zero_grad()
         for inx, (img, mask, label, clinical) in tqdm(enumerate(self.train_loader), total=len(self.train_loader)):
             img, label, clinical, mask = img.to(self.device), label.to(self.device), clinical.to(self.device), mask.to(
                 self.device)
-            cls = self.model(img)[-1]
-            loss = self.loss_function(cls, label)
-            self.optimizer.zero_grad()
-            loss.backward()
-            self.optimizer.step()
+            with torch.cuda.amp.autocast(enabled=(self.args.amp and self.device.type == 'cuda')):
+                cls = self.model(img, clinical)[-1]
+                if self.args.num_classes > 2:
+                    loss = self.loss_function(cls, label.long().view(-1))
+                else:
+                    loss = self.loss_function(cls, label)
+                loss_for_backward = loss / self.args.accumulation_steps
+            self.scaler.scale(loss_for_backward).backward()
+            if ((inx + 1) % self.args.accumulation_steps == 0) or ((inx + 1) == len(self.train_loader)):
+                if self.args.max_grad_norm > 0:
+                    self.scaler.unscale_(self.optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.max_grad_norm)
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                self.optimizer.zero_grad()
             all_preds.extend(cls.detach().cpu().numpy())
             all_labels.extend(label.cpu().numpy())
             acc, precision, recall, f1 = self.calculate_metrics(cls.cpu(), label.cpu())
@@ -189,37 +217,47 @@ class Trainer:
         meters = self.get_meters()
         all_preds = []
         all_labels = []
+        all_probs = []
         with torch.no_grad():  # 禁用梯度计算
             for inx, (img, mask, label, clinical) in tqdm(enumerate(self.test_loader), total=len(self.test_loader)):
                 img, label, clinical, mask = img.to(self.device), label.to(self.device), clinical.to(
                     self.device), mask.to(self.device)
-                cls = self.model(img)[-1]
+                with torch.cuda.amp.autocast(enabled=(self.args.amp and self.device.type == 'cuda')):
+                    cls = self.model(img, clinical)[-1]
                 # pred = torch.sigmoid(cls)
 
-                loss_val = self.loss_function(cls, label)
+                if self.args.num_classes > 2:
+                    loss_val = self.loss_function(cls, label.long().view(-1))
+                else:
+                    loss_val = self.loss_function(cls, label)
                 # dice_loss_val = self.dice_loss(seg, mask)
                 # total_loss_val = self.loss_weight[0] * cls_loss_val + self.loss_weight[1] * dice_loss_val
 
                 all_preds.extend(cls.detach().cpu().numpy())
                 all_labels.extend(label.cpu().numpy())
+                if self.args.num_classes > 2:
+                    all_probs.extend(torch.softmax(cls, dim=1).detach().cpu().numpy())
+                else:
+                    all_probs.extend(torch.sigmoid(cls).detach().cpu().numpy())
                 acc, precision, recall, f1 = self.calculate_metrics(cls.cpu(), label.cpu())
                 self.update_meters(
                     [meters[i] for i in meters.keys()],
                     [loss_val, acc, precision, recall, f1])
 
-        meters['accuracy'], meters['precision'], meters['recall'], meters['f1'], meters['auc'] = self.calculate_all_metrics(all_preds, all_labels)
+        meters['accuracy'], meters['precision'], meters['recall'], meters['f1'], _ = self.calculate_all_metrics(all_preds, all_labels)
+        meters['auc_prob'] = meters['f1'] if self.args.num_classes > 2 else meters['accuracy']
         self.print_metrics(meters, prefix=f'Epoch-Val: [{self.epoch}]{len(self.train_loader)}]')
         # 更新学习率调度器
         self.scheduler.step(meters['loss'].avg)
         # 记录性能指标到TensorBoard
         self.log_metrics_to_tensorboard(meters, self.epoch, stage_prefix='Val')
-        print(f'Best acc is {self.best_acc} at epoch {self.best_acc_epoch}!')
-        print(f'{self.best_acc}=>{meters["accuracy"]}')
+        print(f'Best score is {self.best_score} at epoch {self.best_score_epoch}!')
+        print(f'{self.best_score}=>{meters["auc_prob"]}')
 
         # 检查并保存最佳模型
-        if meters['accuracy'] > self.best_acc:
-            self.best_acc_epoch = self.epoch
-            self.best_acc = meters['accuracy']
+        if meters['auc_prob'] > self.best_score:
+            self.best_score_epoch = self.epoch
+            self.best_score = meters['auc_prob']
             self.best_metrics = meters
             with open(os.path.join(os.path.dirname(self.args.save_dir), 'best_acc_metrics.json'), 'w')as f:
                 json.dump({k: v for k, v in meters.items() if not isinstance(v, AverageMeter)}, f)
@@ -229,9 +267,12 @@ class Trainer:
                 'model_state_dict': self.model.state_dict(),
                 'optimizer_state_dict': self.optimizer.state_dict(),
                 'scheduler_state_dict': self.scheduler.state_dict(),
-                'best_acc': self.best_acc,
+                    'best_acc': self.best_score,
             }, os.path.join(self.args.save_dir, 'best_checkpoint.pth'))
-            print(f"New best model saved at epoch {self.best_acc_epoch} with accuracy: {self.best_acc:.4f}")
+            print(f"New best model saved at epoch {self.best_score_epoch} with auc_prob: {self.best_score:.4f}")
+            improved = True
+        else:
+            improved = False
         self.print_metrics(meters, prefix=f'Epoch(Val): [{self.epoch}][{inx + 1}/{len(self.train_loader)}]')
 
         if self.epoch % self.args.save_epoch == 0:
@@ -240,59 +281,70 @@ class Trainer:
                     'model_state_dict': self.model.state_dict(),  # *模型参数
                     'optimizer_state_dict': self.optimizer.state_dict(),  # *优化器参数
                     'scheduler_state_dict': self.scheduler.state_dict(),  # *scheduler
-                    'best_acc': meters['accuracy'],
+                    'best_acc': meters['auc_prob'],
                     'num_params': self.num_params
                 }
             torch.save(checkpoint, os.path.join(self.args.save_dir, 'checkpoint-%d.pth' % self.epoch))
-            print(f"New checkpoint saved at epoch {self.epoch} with accuracy: {meters['accuracy']:.4f}")
+            print(f"New checkpoint saved at epoch {self.epoch} with auc_prob: {meters['auc_prob']:.4f}")
+        return improved
 
 def makedirs(path):
     if not os.path.exists(path):
         os.makedirs(path)
     return path
 
+def apply_preset(args):
+    if args.preset == 't4_12h':
+        if args.rd == 50:
+            args.rd = 18
+        if args.batch_size == 1:
+            args.batch_size = 1
+        if args.epochs == 100:
+            args.epochs = 60
+        if args.accumulation_steps == 4:
+            args.accumulation_steps = 8
+        if args.early_stop_patience == 10:
+            args.early_stop_patience = 8
+        if args.lr == 0.0001:
+            args.lr = 1e-4
+        if args.dropout == 0:
+            args.dropout = 0.2
+        args.amp = True
+
 def main(args, path):
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print("can use {} gpus".format(torch.cuda.device_count()))
     print(device)
-    model = generate_model(model_depth=args.rd, n_classes=args.num_classes, dropout_rate=args.dropout)
-
-    # dropout_rate = 0.8  # Dropout概率，一般设置在0.3到0.5之间
-    # num_features = model.fc.in_features
-    # model.fc = nn.Sequential(
-    #     nn.Dropout(dropout_rate),
-    #     nn.Linear(num_features, args.num_classes-1)  # num_classes为您的数据集类别数
-    # )
-
-    # if torch.cuda.device_count() > 1:
-    #     model = DataParallel(model)
-    # model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, betas=(0.9, 0.99))
-    # scheduler = ExponentialLR(optimizer, gamma=0.99)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.1, patience=10, verbose=True)
-
     # data
     with open('configs/dataset.json', 'r', encoding='utf-8') as f:
         dataset = json.load(f)
     data_dir = dataset['data_dir']
     infos_name = dataset['infos_name']
-    filter_volume = dataset['filter_volume']
-    train_info, val_info = split_data(data_dir, infos_name, filter_volume, rate=0.8)
-    # with open(os.path.join(data_dir, 'train_clinical_infos.json'), 'r', encoding='utf-8') as f:
-    #     train_info = json.load(f)
-    # with open(os.path.join(data_dir, 'val_clinical_infos.json'), 'r', encoding='utf-8') as f:
-    #     val_info = json.load(f)
+    filter_volume = dataset.get('filter_volume', 0.0)
+    train_info, val_info = split_data(data_dir, infos_name, filter_volume, rate=0.8, seed=args.seed)
     train_loader = my_dataloader(data_dir,
                                       train_info,
                                       batch_size=args.batch_size,
                                       shuffle=True,
-                                      num_workers=args.num_workers)
+                                      num_workers=args.num_workers,
+                                      phase='train')
+    clinical_dim = train_loader.dataset.clinical_dim if hasattr(train_loader.dataset, "clinical_dim") else 0
     val_loader = my_dataloader(data_dir,
                                      val_info,
                                      batch_size=args.batch_size,
                                      shuffle=False,
-                                     num_workers=args.num_workers)
+                                     num_workers=args.num_workers,
+                                     phase='val',
+                                     clinical_preprocessor=getattr(train_loader.dataset, "clinical_preprocessor", None))
+    model = generate_model(
+        model_depth=args.rd,
+        n_classes=args.num_classes,
+        dropout_rate=args.dropout,
+        n_input_features=clinical_dim
+    )
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, betas=(0.9, 0.99))
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.1, patience=8, verbose=True)
     summaryWriter = None
     if args.phase == 'train':
 
@@ -314,6 +366,7 @@ def main(args, path):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
+    parser.add_argument('--preset', type=str, default='none', choices=['none', 't4_12h'])
     parser.add_argument('--num-classes', type=int, default=2)
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--batch-size', type=int, default=1)
@@ -327,8 +380,14 @@ if __name__ == '__main__':
     parser.add_argument('--MODEL-WEIGHT', type=str, default=None)
     parser.add_argument('--phase', type=str, default='train')
     parser.add_argument('--dropout', type=float, default=0)
+    parser.add_argument('--seed', type=int, default=1900)
+    parser.add_argument('--amp', action='store_true')
+    parser.add_argument('--accumulation-steps', type=int, default=4)
+    parser.add_argument('--early-stop-patience', type=int, default=10)
+    parser.add_argument('--max-grad-norm', type=float, default=1.0)
 
     opt = parser.parse_args()
+    apply_preset(opt)
     args_dict = vars(opt)
     now = time.strftime('%y%m%d%H%M', time.localtime())
     path = None

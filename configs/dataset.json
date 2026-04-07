@@ -1,8 +1,23 @@
 {
-  "data_dir": "/home/fanchenchenzc/datasets/data",
-  "infos_name": "clinical_infos_0220.json",
-  "img_dir": "cropped_img",
-  "mask_dir": "cropped_mask",
-  "filter_volume": 0.006,
-  "clinical_dir": "clinical.xlsx"
+  "data_dir": "/kaggle/input/datasets/umutkrdrms/nsclc-radiomics",
+  "infos_name": "/kaggle/input/datasets/manuelcldg/radiomics-nsclc/phase1_metadata.csv",
+  "img_dir": "nsclc_data/imgs_nii",
+  "mask_dir": "nsclc_data/mask_nii",
+  "filter_volume": 0.0,
+  "clinical_dir": "/kaggle/input/datasets/saibhossain/clinical-data-of-nsclc-lungi1/NSCLC-Radiomics-Lung1.clinical-version3-Oct-2019.csv",
+  "pid_col": "PatientID",
+  "metadata_pid_col": "patient_id",
+  "metadata_ct_col": "ct_path",
+  "metadata_seg_col": "seg_path",
+  "metadata_source_prefix": "/kaggle/input/datasets/umutkrdrms/nsclc-radiomics/NSCLC-Radiomics",
+  "clinical_features": [
+    "age",
+    "clinical.T.Stage",
+    "Clinical.N.Stage",
+    "Clinical.M.Stage",
+    "Overall.Stage",
+    "gender",
+    "Survival.time"
+  ],
+  "label_col": "Histology"
 }

@@ -6,42 +6,129 @@
 import os
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'TRUE'
 import numpy as np
-import random
 import torch
 from torch.utils.data import DataLoader, Dataset
 import json
-from skimage.transform import resize
 import SimpleITK as sitk
-from scipy.ndimage import zoom
-from collections import defaultdict
-from skimage.morphology import dilation, ball, closing
-from scipy.ndimage import gaussian_filter
 import pandas as pd
+from sklearn.model_selection import StratifiedShuffleSplit
 
-def split_data(data_dir, infos_name, filter_volume, rate=0.8):
-    with open(os.path.join(data_dir, infos_name), 'r', encoding='utf-8') as f:
-        infos = json.load(f)
+def split_data(data_dir, infos_name, filter_volume=0.0, rate=0.8, seed=1900):
+    infos_path = os.path.join(data_dir, infos_name)
+    if infos_name.lower().endswith(".csv"):
+        infos = build_infos_from_metadata_csv(data_dir, infos_name)
+    else:
+        with open(infos_path, 'r', encoding='utf-8') as f:
+            infos = json.load(f)
 
-    infos = list(filter(lambda x: x['volume'] >= filter_volume, infos))
-    # 创建一个字典，用于按类别存储数据
-    class_data = defaultdict(list)
-    for info in infos:
-        label = info['label']  # 假设数据集中每个样本都有'label'字段表示类别
-        class_data[label].append(info)
+    valid_infos = []
+    for x in infos:
+        if float(x.get("volume", 1.0)) >= float(filter_volume):
+            valid_infos.append(x)
+    infos = valid_infos
 
-    train_infos = []
-    test_infos = []
-
-    # 对每个类别进行分层抽样
-    for label, data in class_data.items():
-        random.seed(1900)
-        random.shuffle(data)
-        num_samples = len(data)
-        train_num = int(rate * num_samples)
-        train_infos.extend(data[:train_num])
-        test_infos.extend(data[train_num:])
-
+    labels = np.array([int(i["label"]) for i in infos])
+    splitter = StratifiedShuffleSplit(n_splits=1, train_size=rate, random_state=seed)
+    train_idx, test_idx = next(splitter.split(np.zeros(len(labels)), labels))
+    train_infos = [infos[i] for i in train_idx]
+    test_infos = [infos[i] for i in test_idx]
     return train_infos, test_infos
+
+def _normalize_pid(pid):
+    pid = str(pid).upper().strip().replace("_", "-").replace(" ", "-")
+    if pid.startswith("LUNG1-"):
+        suffix = pid.split("-")[-1]
+        if suffix.isdigit():
+            return f"LUNG1-{int(suffix):03d}"
+    return pid
+
+def _resolve_metadata_path(raw_path, data_dir, source_prefix):
+    raw = str(raw_path).strip()
+    raw = raw.replace(
+        "/kaggle/input/nsclc-radiomics/",
+        "/kaggle/input/datasets/umutkrdrms/nsclc-radiomics/"
+    )
+    if source_prefix and raw.startswith(source_prefix):
+        raw = raw.replace(source_prefix, data_dir, 1)
+    if os.path.exists(raw):
+        return raw
+    if os.path.exists(os.path.join(data_dir, raw)):
+        return os.path.join(data_dir, raw)
+    return raw
+
+def _load_image_or_series(path_like):
+    if os.path.isfile(path_like):
+        if str(path_like).lower().endswith(".dcm"):
+            # If a single DICOM file is provided, load the full series from its folder.
+            folder = os.path.dirname(path_like)
+            reader = sitk.ImageSeriesReader()
+            series_ids = reader.GetGDCMSeriesIDs(folder)
+            if series_ids:
+                file_names = reader.GetGDCMSeriesFileNames(folder, series_ids[0])
+                reader.SetFileNames(file_names)
+                return reader.Execute()
+        return sitk.ReadImage(path_like)
+    if os.path.isdir(path_like):
+        reader = sitk.ImageSeriesReader()
+        series_ids = reader.GetGDCMSeriesIDs(path_like)
+        if not series_ids:
+            raise FileNotFoundError(f"No DICOM series found under: {path_like}")
+        file_names = reader.GetGDCMSeriesFileNames(path_like, series_ids[0])
+        reader.SetFileNames(file_names)
+        return reader.Execute()
+    raise FileNotFoundError(f"Path does not exist: {path_like}")
+
+def build_infos_from_metadata_csv(data_dir, metadata_name):
+    cfg_path = os.path.join('configs', 'dataset.json')
+    with open(cfg_path, 'r', encoding='utf-8') as f:
+        cfg = json.load(f)
+    metadata_path = os.path.join(data_dir, metadata_name)
+    clinical_path = os.path.join(data_dir, cfg.get('clinical_dir', ''))
+    df_meta = pd.read_csv(metadata_path)
+    df_cli = pd.read_csv(clinical_path) if clinical_path.lower().endswith(".csv") else pd.read_excel(clinical_path)
+    pid_col = cfg.get('pid_col', 'PatientID')
+    if pid_col not in df_cli.columns:
+        raise ValueError(f"Clinical file missing pid column '{pid_col}'")
+    label_col = cfg.get("label_col", "deadstatus.event")
+    if label_col not in df_cli.columns:
+        raise ValueError(f"Clinical file missing label column '{label_col}'")
+
+    df_lab = df_cli[[pid_col, label_col]].dropna()
+    if df_lab.empty:
+        raise ValueError(f"No non-null labels found for '{label_col}'")
+
+    if label_col == "deadstatus.event":
+        label_map = { _normalize_pid(r[pid_col]): int(r[label_col]) for _, r in df_lab.iterrows() }
+        label_vocab = None
+    else:
+        label_values = df_lab[label_col].astype(str).fillna("Unknown")
+        label_vocab = sorted(label_values.unique().tolist())
+        label_to_idx = {v: i for i, v in enumerate(label_vocab)}
+        label_map = { _normalize_pid(r[pid_col]): int(label_to_idx[str(r[label_col])]) for _, r in df_lab.iterrows() }
+    source_prefix = cfg.get('metadata_source_prefix', '/kaggle/input/nsclc-radiomics/NSCLC-Radiomics')
+    pid_key = cfg.get('metadata_pid_col', 'patient_id')
+    ct_key = cfg.get('metadata_ct_col', 'ct_path')
+    seg_key = cfg.get('metadata_seg_col', 'seg_path')
+    infos = []
+    for _, row in df_meta.iterrows():
+        pid = _normalize_pid(row[pid_key])
+        if pid not in label_map:
+            continue
+        label_name = None
+        if label_vocab is not None:
+            label_name = label_vocab[int(label_map[pid])]
+        infos.append(
+            {
+                'pid': pid,
+                'sid': pid,
+                'label': int(label_map[pid]),
+                'label_name': label_name,
+                'volume': 1.0,
+                'ct_path': _resolve_metadata_path(row[ct_key], data_dir, source_prefix),
+                'seg_path': _resolve_metadata_path(row[seg_key], data_dir, source_prefix),
+            }
+        )
+    return infos
 
 # class MyDataset(Dataset):
 #     def __init__(self, data_dir, infos, input_size, phase='train', task=[0, 1]):
@@ -215,7 +302,7 @@ def split_data(data_dir, infos_name, filter_volume, rate=0.8):
 #         return img, mask
 
 class MyDataset(Dataset):
-    def __init__(self, data_dir, infos, phase='train'):
+    def __init__(self, data_dir, infos, phase='train', clinical_preprocessor=None):
         with open('configs/dataset.json', 'r', encoding='utf-8') as f:
             config = json.load(f)
 
@@ -224,26 +311,101 @@ class MyDataset(Dataset):
         img_dir = config['img_dir']
         mask_dir = config['mask_dir']
         data_dir = config['data_dir']
-        clinical_dir = config['clinical_dir']
-        self.use_clinical = False
-        if clinical_dir:
-            self.use_clinical = True
-            self.clinical = pd.read_excel(os.path.join(data_dir, clinical_dir))
+        self.pid_col = config.get('pid_col', 'pid')
+        clinical_dir = config.get('clinical_dir', '')
+        self.clinical_features = config.get('clinical_features', [])
+        self.use_clinical = bool(clinical_dir)
+        self.clinical_preprocessor = clinical_preprocessor
+        self.clinical_dim = 0
+        self.clinical_map = {}
+        if self.use_clinical:
+            clinical_path = os.path.join(data_dir, clinical_dir)
+            if clinical_dir.lower().endswith('.csv'):
+                clinical_df = pd.read_csv(clinical_path)
+            else:
+                clinical_df = pd.read_excel(clinical_path)
+            if self.pid_col not in clinical_df.columns:
+                raise ValueError(f"pid_col '{self.pid_col}' not found in clinical file")
+            if not self.clinical_features:
+                reserved_cols = {
+                    self.pid_col, 'label', 'deadstatus.event', 'Survival.time',
+                    'PatientID', 'pid', 'id'
+                }
+                self.clinical_features = [c for c in clinical_df.columns if c not in reserved_cols]
+            self.clinical_map = self._prepare_clinical_map(clinical_df)
+            self.clinical_dim = len(next(iter(self.clinical_map.values()))) if self.clinical_map else 0
         self.img_dir = os.path.join(data_dir, img_dir)
         self.labels = [i['label'] for i in infos]
         self.mask_dir = os.path.join(data_dir, mask_dir)
         self.ids = [i['sid'] for i in infos]
         self.pids = [i['pid'] for i in infos]
+        self.ct_paths = [i.get('ct_path') for i in infos]
+        self.seg_paths = [i.get('seg_path') for i in infos]
         self.phase = phase
         self.labels = torch.tensor(self.labels, dtype=torch.float)
 
+    def _prepare_clinical_map(self, clinical_df):
+        df = clinical_df.copy()
+        for c in self.clinical_features:
+            if c not in df.columns:
+                df[c] = np.nan
+        feat_df = df[[self.pid_col] + self.clinical_features].copy()
+        numeric_cols = [c for c in self.clinical_features if pd.api.types.is_numeric_dtype(feat_df[c])]
+        categorical_cols = [c for c in self.clinical_features if c not in numeric_cols]
+
+        if self.clinical_preprocessor is None:
+            numeric_medians = {c: float(feat_df[c].median()) if not feat_df[c].dropna().empty else 0.0 for c in numeric_cols}
+            numeric_means = {}
+            numeric_stds = {}
+            for c in numeric_cols:
+                filled = feat_df[c].fillna(numeric_medians[c]).astype(float)
+                numeric_means[c] = float(filled.mean())
+                std = float(filled.std())
+                numeric_stds[c] = std if std > 1e-6 else 1.0
+            cat_vocab = {}
+            for c in categorical_cols:
+                values = feat_df[c].fillna('Unknown').astype(str)
+                cat_vocab[c] = sorted(values.unique().tolist())
+            self.clinical_preprocessor = {
+                'numeric_cols': numeric_cols,
+                'categorical_cols': categorical_cols,
+                'numeric_medians': numeric_medians,
+                'numeric_means': numeric_means,
+                'numeric_stds': numeric_stds,
+                'cat_vocab': cat_vocab,
+            }
+
+        clinical_map = {}
+        for _, row in feat_df.iterrows():
+            pid = str(row[self.pid_col])
+            vec = []
+            for c in self.clinical_preprocessor['numeric_cols']:
+                value = row[c] if c in row.index else np.nan
+                if pd.isna(value):
+                    value = self.clinical_preprocessor['numeric_medians'][c]
+                value = float(value)
+                value = (value - self.clinical_preprocessor['numeric_means'][c]) / self.clinical_preprocessor['numeric_stds'][c]
+                vec.append(value)
+            for c in self.clinical_preprocessor['categorical_cols']:
+                value = row[c] if c in row.index else 'Unknown'
+                value = 'Unknown' if pd.isna(value) else str(value)
+                vocab = self.clinical_preprocessor['cat_vocab'][c]
+                vec.extend([1.0 if value == v else 0.0 for v in vocab])
+            clinical_map[pid] = np.array(vec, dtype=np.float32)
+        return clinical_map
 
     def __len__(self):
         return len(self.ids)
 
     def __getitem__(self, i):
-        img = sitk.ReadImage(os.path.join(self.img_dir, f"{self.ids[i]}.nii.gz"))
-        mask = sitk.ReadImage(os.path.join(self.mask_dir, f"{self.ids[i]}.nii.gz"))
+        if self.ct_paths[i]:
+            img = _load_image_or_series(self.ct_paths[i])
+        else:
+            img = sitk.ReadImage(os.path.join(self.img_dir, f"{self.ids[i]}.nii.gz"))
+        if self.seg_paths[i]:
+            mask = _load_image_or_series(self.seg_paths[i])
+        else:
+            mask = sitk.ReadImage(os.path.join(self.mask_dir, f"{self.ids[i]}.nii.gz"))
         if self.phase == 'train':
             img, mask = self.train_preprocess(img, mask)
         else:
@@ -252,14 +414,14 @@ class MyDataset(Dataset):
         mask = torch.tensor(mask, dtype=torch.uint8).unsqueeze(0)
         label = self.labels[i].unsqueeze(0)
 
-        if self.use_clinical:
-            pid = self.pids[i]
-            # print(pid)
-            clinical = self.clinical[self.clinical['pid']==pid].fillna(0)
-            # print(clinical)
-            clinical = torch.tensor(np.array(clinical.values[0][1:], dtype=np.float32), dtype=torch.float32)
+        if self.use_clinical and self.clinical_dim > 0:
+            pid = str(self.pids[i])
+            if pid in self.clinical_map:
+                clinical = torch.tensor(self.clinical_map[pid], dtype=torch.float32)
+            else:
+                clinical = torch.zeros(self.clinical_dim, dtype=torch.float32)
         else:
-            clinical = 0
+            clinical = torch.zeros(1, dtype=torch.float32)
 
         return img, mask, label, clinical
 
@@ -291,8 +453,8 @@ class MyDataset(Dataset):
         return (img - min) / (max - min)
 
 
-def my_dataloader(data_dir, infos, batch_size=1, shuffle=True, num_workers=0):
-    dataset = MyDataset(data_dir, infos)
+def my_dataloader(data_dir, infos, batch_size=1, shuffle=True, num_workers=0, phase='train', clinical_preprocessor=None):
+    dataset = MyDataset(data_dir, infos, phase=phase, clinical_preprocessor=clinical_preprocessor)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
     return dataloader
 
