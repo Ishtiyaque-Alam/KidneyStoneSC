@@ -101,7 +101,8 @@ class Trainer:
         self.epoch = 0
         self.best_acc = 0
         self.args = args
-        self.loss_function = torch.nn.BCELoss()
+        self.is_multiclass = args.num_classes > 2
+        self.loss_function = torch.nn.CrossEntropyLoss() if self.is_multiclass else torch.nn.BCELoss()
         self.summaryWriter = summaryWriter
         self.use_clip = args.clinical
         self.dice_loss = DiceLoss(sigmoid=True)
@@ -147,10 +148,18 @@ class Trainer:
             # print("Unique values in labels:", torch.unique(mask))
             # print("seg shape: {}, mask shape: {}".format(seg.shape, mask.shape))
             self.dice_metric.reset()
-            precision_val = precision(pred, label)
-            recall_val = recall(pred, label)
-            f1_score_val = calculate_f1_score(pred, label)
-            acc = calculate_acc_sigmoid(pred, label)
+            if self.is_multiclass:
+                pred_cls = torch.argmax(pred, dim=1)
+                gt_cls = label.long().view(-1)
+                precision_val = precision_score(gt_cls.cpu(), pred_cls.cpu(), average='macro', zero_division=0)
+                recall_val = recall_score(gt_cls.cpu(), pred_cls.cpu(), average='macro', zero_division=0)
+                f1_score_val = f1_score(gt_cls.cpu(), pred_cls.cpu(), average='macro', zero_division=0)
+                acc = (pred_cls == gt_cls).float().mean().item()
+            else:
+                precision_val = precision(pred, label)
+                recall_val = recall(pred, label)
+                f1_score_val = calculate_f1_score(pred, label)
+                acc = calculate_acc_sigmoid(pred, label)
         return acc, precision_val, recall_val, f1_score_val, dice
 
     def update_meters(self, meters, values):
@@ -198,15 +207,19 @@ class Trainer:
             if not self.use_clip:
                 clinical = torch.zeros_like(clinical)
             seg, cls = self.model([img, clinical])
-            pred = torch.sigmoid(cls)
-            cls_loss = self.loss_function(pred, label)
+            if self.is_multiclass:
+                cls_loss = self.loss_function(cls, label.long().view(-1))
+                pred_for_metrics = cls
+            else:
+                pred_for_metrics = torch.sigmoid(cls)
+                cls_loss = self.loss_function(pred_for_metrics, label)
             dice_loss = self.dice_loss(seg, mask)
             loss = self.loss_weight[0] * cls_loss + self.loss_weight[1] * dice_loss
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
 
-            acc, precision_val, recall_val, f1_score_val, dice = self.calculate_metrics(pred, label, seg, mask)
+            acc, precision_val, recall_val, f1_score_val, dice = self.calculate_metrics(pred_for_metrics, label, seg, mask)
             self.update_meters(
                 [meters['loss'], meters['accuracy'], meters['precision'], meters['recall'], meters['f1_score'],
                  meters['dice'], meters['cls_loss'], meters['dice_loss']],
@@ -240,13 +253,16 @@ class Trainer:
                     clinical = torch.zeros_like(clinical)
 
                 seg, cls = self.model([img, clinical])
-                pred = torch.sigmoid(cls)
-
-                cls_loss_val = self.loss_function(pred, label)
+                if self.is_multiclass:
+                    pred_for_metrics = cls
+                    cls_loss_val = self.loss_function(cls, label.long().view(-1))
+                else:
+                    pred_for_metrics = torch.sigmoid(cls)
+                    cls_loss_val = self.loss_function(pred_for_metrics, label)
                 dice_loss_val = self.dice_loss(seg, mask)
                 total_loss_val = self.loss_weight[0] * cls_loss_val + self.loss_weight[1] * dice_loss_val
 
-                acc, precision_val, recall_val, f1_score_val, dice_val = self.calculate_metrics(pred, label, seg, mask)
+                acc, precision_val, recall_val, f1_score_val, dice_val = self.calculate_metrics(pred_for_metrics, label, seg, mask)
 
                 self.update_meters(
                     [meters['loss'], meters['accuracy'], meters['precision'], meters['recall'],
@@ -307,9 +323,15 @@ def main(args, path):
     infos_name = dataset['infos_name']
     filter_volume = dataset['filter_volume']
     target_size = tuple(dataset.get('target_size', [48, 48, 48]))
+    train_info, val_info = split_data(data_dir, infos_name, filter_volume, rate=0.8)
     # model = generate_model(model_depth=args.rd, n_classes=args.num_classes, dropout_rate=args.dropout)
     # model = UNETR(in_channels=1, out_channels=1, img_size=target_size, feature_size=16, patch_size=16)
-    model = DoubleFlow(in_channels=1, out_channels=1, img_size=target_size, feature_size=16, patch_size=16)
+    if train_info:
+        detected_num_classes = len(set(int(x["label"]) for x in train_info))
+        if detected_num_classes > 1 and args.num_classes != detected_num_classes:
+            print(f"[Info] Detected {detected_num_classes} classes from metadata. Overriding --num-classes={args.num_classes}.")
+            args.num_classes = detected_num_classes
+    model = DoubleFlow(in_channels=1, out_channels=1, num_classes=args.num_classes, img_size=target_size, feature_size=16, patch_size=16)
 
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, betas=(0.9, 0.99))
@@ -317,7 +339,6 @@ def main(args, path):
     # scheduler = ExponentialLR(optimizer, gamma=0.99)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.1, patience=10)
 
-    train_info, val_info = split_data(data_dir, infos_name, filter_volume, rate=0.8)
     # with open(os.path.join(data_dir, 'train_clinical_infos.json'), 'r', encoding='utf-8') as f:
     #     train_info = json.load(f)
     # with open(os.path.join(data_dir, 'val_clinical_infos.json'), 'r', encoding='utf-8') as f:

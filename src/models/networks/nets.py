@@ -587,6 +587,7 @@ class DoubleFlow(nn.Module):
                     self,
                     in_channels: int,
                     out_channels: int,
+                    num_classes: int = 2,
                     img_size: Union[Sequence[int], int],
                     feature_size: int = 16,
                     hidden_size: int = 768,
@@ -743,11 +744,12 @@ class DoubleFlow(nn.Module):
             res_block=res_block,
         )
         self.out = UnetOutBlock(spatial_dims=spatial_dims, in_channels=feature_size, out_channels=out_channels)
+        cls_out = num_classes if num_classes > 2 else 1
         self.fc = nn.Sequential(nn.Linear(hidden_size, 256),
                                 nn.BatchNorm1d(256),
                                 nn.ReLU(inplace=True),
                                 nn.Dropout(0.5),
-                                nn.Linear(256, 1))
+                                nn.Linear(256, cls_out))
 
     def proj_feat(self, x, hidden_size, feat_size):
         new_view = (x.size(0), *feat_size, hidden_size)
