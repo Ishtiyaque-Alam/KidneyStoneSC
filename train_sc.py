@@ -273,7 +273,7 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config-file', type=str, default='configs/config.yaml')
+    parser.add_argument('--config-file', type=str, default='/kaggle/working/KidneyStoneSC/configs/config.yaml')
     parser.add_argument('--task', type=str, default=[0, 1])
     parser.add_argument('--pretrain-sc', type=str, default=None)
     parser.add_argument('--input-path', type=str, default='/home/KidneyData/data')

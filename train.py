@@ -269,10 +269,10 @@ def main(args, save_path):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config-file', type=str, default='configs/config.yaml')
+    parser.add_argument('--config-file', type=str, default='/kaggle/working/KidneyStoneSC/configs/config.yaml')
     parser.add_argument('--task', type=str, default=[0, 1])
     parser.add_argument('--pretrain-sc', type=str, default=None)
-    parser.add_argument('--input-path', type=str, default='/home/KidneyData/data')
+    parser.add_argument('--input-path', type=str, default='/kaggle/input/datasets/umutkrdrms/nsclc-radiomics')
     parser.add_argument('--output-path', type=str, default='./results')
     parser.add_argument('--input-size', type=str, default="48, 48, 48")
     parser.add_argument('--num-classes', type=int, default=2)
