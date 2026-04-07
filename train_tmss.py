@@ -4,6 +4,7 @@
 # File    : train_base.py
 
 import warnings
+import ast
 
 import pandas as pd
 
@@ -106,7 +107,7 @@ class Trainer:
         self.dice_loss = DiceLoss(sigmoid=True)
         self.dice_metric = DiceMetric(include_background=False, reduction="mean", get_not_nans=False)
         self.self_model()
-        self.loss_weight = eval(args.loss_weight)
+        self.loss_weight = ast.literal_eval(args.loss_weight) if isinstance(args.loss_weight, str) else args.loss_weight
 
         if not self.use_clip:
             print("Not using clinical infos!")
@@ -299,22 +300,23 @@ def main(args, path):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print("can use {} gpus".format(torch.cuda.device_count()))
     print(device)
-    # model = generate_model(model_depth=args.rd, n_classes=args.num_classes, dropout_rate=args.dropout)
-    # model = UNETR(in_channels=1, out_channels=1, img_size=(48, 48, 48), feature_size=16, patch_size=16)
-    model = DoubleFlow(in_channels=1, out_channels=1, img_size=(48, 48, 48), feature_size=16, patch_size=16)
-
-
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, betas=(0.9, 0.99))
-    # optimizer = torch.optim.Adam(model.fc.parameters(), lr=args.lr, weight_decay=0.01, betas=(0.9, 0.99))
-    # scheduler = ExponentialLR(optimizer, gamma=0.99)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.1, patience=10, verbose=True)
-
     # data
     with open('/kaggle/working/KidneyStoneSC/configs/dataset.json', 'r', encoding='utf-8') as f:
         dataset = json.load(f)
     data_dir = dataset['data_dir']
     infos_name = dataset['infos_name']
     filter_volume = dataset['filter_volume']
+    target_size = tuple(dataset.get('target_size', [48, 48, 48]))
+    # model = generate_model(model_depth=args.rd, n_classes=args.num_classes, dropout_rate=args.dropout)
+    # model = UNETR(in_channels=1, out_channels=1, img_size=target_size, feature_size=16, patch_size=16)
+    model = DoubleFlow(in_channels=1, out_channels=1, img_size=target_size, feature_size=16, patch_size=16)
+
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, betas=(0.9, 0.99))
+    # optimizer = torch.optim.Adam(model.fc.parameters(), lr=args.lr, weight_decay=0.01, betas=(0.9, 0.99))
+    # scheduler = ExponentialLR(optimizer, gamma=0.99)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.1, patience=10)
+
     train_info, val_info = split_data(data_dir, infos_name, filter_volume, rate=0.8)
     # with open(os.path.join(data_dir, 'train_clinical_infos.json'), 'r', encoding='utf-8') as f:
     #     train_info = json.load(f)
@@ -324,12 +326,15 @@ def main(args, path):
                                       train_info,
                                       batch_size=args.batch_size,
                                       shuffle=True,
-                                      num_workers=args.num_workers)
+                                      num_workers=args.num_workers,
+                                      phase='train')
     val_loader = my_dataloader(data_dir,
                                      val_info,
                                      batch_size=args.batch_size,
                                      shuffle=False,
-                                     num_workers=args.num_workers)
+                                     num_workers=args.num_workers,
+                                     phase='val',
+                                     clinical_preprocessor=getattr(train_loader.dataset, "clinical_preprocessor", None))
     summaryWriter = None
     if args.phase == 'train':
 
