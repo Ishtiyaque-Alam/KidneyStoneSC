@@ -50,6 +50,12 @@ def _resolve_metadata_path(raw_path, data_dir, source_prefix):
     )
     if source_prefix and raw.startswith(source_prefix):
         raw = raw.replace(source_prefix, data_dir, 1)
+    if raw.startswith("/kaggle/input/datasets/umutkrdrms/nsclc-radiomics/LUNG1-"):
+        raw = raw.replace(
+            "/kaggle/input/datasets/umutkrdrms/nsclc-radiomics/",
+            "/kaggle/input/datasets/umutkrdrms/nsclc-radiomics/NSCLC-Radiomics/",
+            1,
+        )
     if os.path.exists(raw):
         return raw
     if os.path.exists(os.path.join(data_dir, raw)):
