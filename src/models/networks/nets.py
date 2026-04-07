@@ -746,7 +746,7 @@ class DoubleFlow(nn.Module):
         self.out = UnetOutBlock(spatial_dims=spatial_dims, in_channels=feature_size, out_channels=out_channels)
         cls_out = num_classes if num_classes > 2 else 1
         self.fc = nn.Sequential(nn.Linear(hidden_size, 256),
-                                nn.BatchNorm1d(256),
+                                nn.LayerNorm(256),
                                 nn.ReLU(inplace=True),
                                 nn.Dropout(0.5),
                                 nn.Linear(256, cls_out))
