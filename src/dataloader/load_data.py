@@ -85,6 +85,20 @@ def _load_image_or_series(path_like):
         return reader.Execute()
     raise FileNotFoundError(f"Path does not exist: {path_like}")
 
+def _ensure_3d(arr):
+    arr = np.asarray(arr)
+    arr = np.squeeze(arr)
+    if arr.ndim == 3:
+        return arr
+    if arr.ndim == 4:
+        # Handle DICOM SEG / vector-like arrays by selecting the first channel.
+        # Prefer last-axis channel if tiny (common), else first axis.
+        if arr.shape[-1] <= 4:
+            return arr[..., 0]
+        if arr.shape[0] <= 4:
+            return arr[0, ...]
+    raise ValueError(f"Expected 3D volume, got shape {arr.shape}")
+
 def build_infos_from_metadata_csv(data_dir, metadata_name):
     cfg_path = '/kaggle/working/KidneyStoneSC/configs/dataset.json'
     with open(cfg_path, 'r', encoding='utf-8') as f:
@@ -460,8 +474,8 @@ class MyDataset(Dataset):
         # spacing = itkimage.GetSpacing()
         img = sitk.GetArrayFromImage(itkimage)
         mask = sitk.GetArrayFromImage(itkmask)
-
-
+        img = _ensure_3d(img)
+        mask = _ensure_3d(mask)
         return np.array(img, dtype=np.float32), np.array(mask, dtype=np.float32)
 
     def normalize(self, img):
