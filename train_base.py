@@ -344,7 +344,7 @@ def main(args, path):
         n_input_features=clinical_dim
     )
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, betas=(0.9, 0.99))
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.1, patience=8, verbose=True)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.1, patience=8)
     summaryWriter = None
     if args.phase == 'train':
 
