@@ -73,6 +73,7 @@ class Trainer:
         self.best_score = float('-inf')
         self.best_score_epoch = 0
         self.no_improve_epochs = 0
+        self.monitor_name = "val_f1_macro" if args.num_classes > 2 else "val_accuracy"
         self.self_model()
 
     def __call__(self):
@@ -103,6 +104,9 @@ class Trainer:
                             checkpoint_path=self.args.MODEL_WEIGHT,
                             multi_gpu=torch.cuda.device_count() > 1)
             print('load model weight success!')
+        elif torch.cuda.is_available() and torch.cuda.device_count() > 1:
+            self.model = nn.DataParallel(self.model)
+            print(f"Using DataParallel with {torch.cuda.device_count()} GPUs.")
         self.model.to(self.device)
 
     def calculate_metrics(self, pred, label):
@@ -183,8 +187,10 @@ class Trainer:
         all_labels = []
         self.optimizer.zero_grad()
         for inx, (img, mask, label, clinical) in tqdm(enumerate(self.train_loader), total=len(self.train_loader)):
-            img, label, clinical, mask = img.to(self.device), label.to(self.device), clinical.to(self.device), mask.to(
-                self.device)
+            img = img.to(self.device, non_blocking=True)
+            label = label.to(self.device, non_blocking=True)
+            clinical = clinical.to(self.device, non_blocking=True)
+            mask = mask.to(self.device, non_blocking=True)
             with torch.cuda.amp.autocast(enabled=(self.args.amp and self.device.type == 'cuda')):
                 cls = self.model(img, clinical)[-1]
                 if self.args.num_classes > 2:
@@ -231,8 +237,10 @@ class Trainer:
         all_probs = []
         with torch.no_grad():  # 禁用梯度计算
             for inx, (img, mask, label, clinical) in tqdm(enumerate(self.test_loader), total=len(self.test_loader)):
-                img, label, clinical, mask = img.to(self.device), label.to(self.device), clinical.to(
-                    self.device), mask.to(self.device)
+                img = img.to(self.device, non_blocking=True)
+                label = label.to(self.device, non_blocking=True)
+                clinical = clinical.to(self.device, non_blocking=True)
+                mask = mask.to(self.device, non_blocking=True)
                 with torch.cuda.amp.autocast(enabled=(self.args.amp and self.device.type == 'cuda')):
                     cls = self.model(img, clinical)[-1]
                 # pred = torch.sigmoid(cls)
@@ -267,19 +275,19 @@ class Trainer:
                     [loss_val, acc, precision, recall, f1])
 
         meters['accuracy'], meters['precision'], meters['recall'], meters['f1'], _ = self.calculate_all_metrics(all_preds, all_labels)
-        meters['auc_prob'] = meters['f1'] if self.args.num_classes > 2 else meters['accuracy']
+        meters['monitor'] = meters['f1'] if self.args.num_classes > 2 else meters['accuracy']
         self.print_metrics(meters, prefix=f'Epoch-Val: [{self.epoch}]{len(self.train_loader)}]')
         # 更新学习率调度器
         self.scheduler.step(meters['loss'].avg)
         # 记录性能指标到TensorBoard
         self.log_metrics_to_tensorboard(meters, self.epoch, stage_prefix='Val')
-        print(f'Best score is {self.best_score} at epoch {self.best_score_epoch}!')
-        print(f'{self.best_score}=>{meters["auc_prob"]}')
+        print(f'Best {self.monitor_name} is {self.best_score} at epoch {self.best_score_epoch}!')
+        print(f'{self.best_score}=>{meters["monitor"]}')
 
         # 检查并保存最佳模型
-        if meters['auc_prob'] > self.best_score:
+        if meters['monitor'] > self.best_score:
             self.best_score_epoch = self.epoch
-            self.best_score = meters['auc_prob']
+            self.best_score = meters['monitor']
             self.best_metrics = meters
             with open(os.path.join(os.path.dirname(self.args.save_dir), 'best_acc_metrics.json'), 'w')as f:
                 json.dump({k: v for k, v in meters.items() if not isinstance(v, AverageMeter)}, f)
@@ -289,9 +297,9 @@ class Trainer:
                 'model_state_dict': self.model.state_dict(),
                 'optimizer_state_dict': self.optimizer.state_dict(),
                 'scheduler_state_dict': self.scheduler.state_dict(),
-                    'best_acc': self.best_score,
+                    'best_score': self.best_score,
             }, os.path.join(self.args.save_dir, 'best_checkpoint.pth'))
-            print(f"New best model saved at epoch {self.best_score_epoch} with auc_prob: {self.best_score:.4f}")
+            print(f"New best model saved at epoch {self.best_score_epoch} with {self.monitor_name}: {self.best_score:.4f}")
             improved = True
         else:
             improved = False
@@ -303,11 +311,11 @@ class Trainer:
                     'model_state_dict': self.model.state_dict(),  # *模型参数
                     'optimizer_state_dict': self.optimizer.state_dict(),  # *优化器参数
                     'scheduler_state_dict': self.scheduler.state_dict(),  # *scheduler
-                    'best_acc': meters['auc_prob'],
+                    'best_score': meters['monitor'],
                     'num_params': self.num_params
                 }
             torch.save(checkpoint, os.path.join(self.args.save_dir, 'checkpoint-%d.pth' % self.epoch))
-            print(f"New checkpoint saved at epoch {self.epoch} with auc_prob: {meters['auc_prob']:.4f}")
+            print(f"New checkpoint saved at epoch {self.epoch} with {self.monitor_name}: {meters['monitor']:.4f}")
         return improved
 
 def makedirs(path):
@@ -336,6 +344,8 @@ def apply_preset(args):
 def main(args, path):
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    if device.type == 'cuda':
+        torch.backends.cudnn.benchmark = True
     print("can use {} gpus".format(torch.cuda.device_count()))
     print(device)
     # data
@@ -355,7 +365,10 @@ def main(args, path):
                                       batch_size=args.batch_size,
                                       shuffle=True,
                                       num_workers=args.num_workers,
-                                      phase='train')
+                                      phase='train',
+                                      pin_memory=device.type == "cuda",
+                                      persistent_workers=args.num_workers > 0,
+                                      prefetch_factor=args.prefetch_factor)
     clinical_dim = train_loader.dataset.clinical_dim if hasattr(train_loader.dataset, "clinical_dim") else 0
     val_loader = my_dataloader(data_dir,
                                      val_info,
@@ -363,7 +376,10 @@ def main(args, path):
                                      shuffle=False,
                                      num_workers=args.num_workers,
                                      phase='val',
-                                     clinical_preprocessor=getattr(train_loader.dataset, "clinical_preprocessor", None))
+                                     clinical_preprocessor=getattr(train_loader.dataset, "clinical_preprocessor", None),
+                                     pin_memory=device.type == "cuda",
+                                     persistent_workers=args.num_workers > 0,
+                                     prefetch_factor=args.prefetch_factor)
     model = generate_model(
         model_depth=args.rd,
         n_classes=args.num_classes,
@@ -402,6 +418,7 @@ if __name__ == '__main__':
     parser.add_argument('--rd', type=int, default=50)
     parser.add_argument('--save-epoch', type=int, default=10)
     parser.add_argument('--num-workers', type=int, default=0)
+    parser.add_argument('--prefetch-factor', type=int, default=2)
     parser.add_argument('--log_interval', type=int, default=1)
     # parser.add_argument('--input-path', type=str, default='/home/wangchangmiao/kidney/data/')
     parser.add_argument('--MODEL-WEIGHT', type=str, default=None)
