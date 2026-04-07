@@ -303,7 +303,7 @@ def build_infos_from_metadata_csv(data_dir, metadata_name):
 
 class MyDataset(Dataset):
     def __init__(self, data_dir, infos, phase='train', clinical_preprocessor=None):
-        with open('configs/dataset.json', 'r', encoding='utf-8') as f:
+        with open('/kaggle/working/KidneyStoneSC/configs/dataset.json', 'r', encoding='utf-8') as f:
             config = json.load(f)
 
         # img_dir = os.path.join(data_dir, 'cropped_img')
