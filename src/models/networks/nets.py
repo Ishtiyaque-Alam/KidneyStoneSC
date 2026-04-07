@@ -603,16 +603,25 @@ class DoubleFlow(nn.Module):
 
         self.classification = False
 
-        self.img_patch_embedding = PatchEmbeddingBlockOriginal(
+        img_patch_kwargs = dict(
             in_channels=in_channels,
             img_size=img_size,
             patch_size=self.patch_size,
             hidden_size=hidden_size,
             num_heads=num_heads,
-            pos_embed=pos_embed,
             dropout_rate=dropout_rate,
             spatial_dims=spatial_dims,
         )
+        try:
+            self.img_patch_embedding = PatchEmbeddingBlockOriginal(
+                pos_embed=pos_embed,
+                **img_patch_kwargs,
+            )
+        except TypeError:
+            self.img_patch_embedding = PatchEmbeddingBlockOriginal(
+                proj_type=pos_embed,
+                **img_patch_kwargs,
+            )
         self.patch_embedding = PatchEmbeddingBlock(
             in_channels=in_channels,
             img_size=img_size,
