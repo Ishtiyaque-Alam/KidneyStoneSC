@@ -317,7 +317,7 @@ def main(args, path):
     print("can use {} gpus".format(torch.cuda.device_count()))
     print(device)
     # data
-    with open('configs/dataset.json', 'r', encoding='utf-8') as f:
+    with open('/kaggle/working/KidneyStoneSC/configs/dataset.json', 'r', encoding='utf-8') as f:
         dataset = json.load(f)
     data_dir = dataset['data_dir']
     infos_name = dataset['infos_name']
