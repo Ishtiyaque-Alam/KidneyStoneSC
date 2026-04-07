@@ -7,6 +7,7 @@ import os
 import argparse
 import json
 import re
+import ast
 import torch.nn.functional as F
 import monai.losses
 from monai.bundle import ConfigParser
@@ -72,7 +73,11 @@ def main(args):
     # loss
     criterion_seg = monai.losses.DiceLoss()
     criterion_cla = torch.nn.CrossEntropyLoss()
-    criterion_weight = [float(i) for i in eval(args.loss_weights)]
+    if isinstance(args.loss_weights, str):
+        parsed_weights = ast.literal_eval(args.loss_weights)
+    else:
+        parsed_weights = args.loss_weights
+    criterion_weight = [float(i) for i in parsed_weights]
     metrics_seg_list = config.get_parsed_content("VALIDATION#metrics#seg")
     metrics_seg = {k.func.__name__: k for k in metrics_seg_list if type(k) == functools.partial}
     metrics_seg.update({k.__class__.__name__: k for k in metrics_seg_list if type(k) != functools.partial})
