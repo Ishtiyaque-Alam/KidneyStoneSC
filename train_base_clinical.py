@@ -362,7 +362,7 @@ def main(args, path):
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.1, patience=10, verbose=True)
 
     # data
-    with open('configs/dataset.json', 'r', encoding='utf-8') as f:
+    with open('/kaggle/working/KidneyStoneSC/configs/dataset.json', 'r', encoding='utf-8') as f:
         dataset = json.load(f)
     data_dir = dataset['data_dir']
     infos_name = dataset['infos_name']

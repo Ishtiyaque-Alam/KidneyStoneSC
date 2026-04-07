@@ -98,7 +98,7 @@ def main(args):
         else:
             metrics_cla[k.__class__.__name__] = k
     # data
-    with open('configs/dataset.json', 'r', encoding='utf-8') as f:
+    with open('/kaggle/working/KidneyStoneSC/configs/dataset.json', 'r', encoding='utf-8') as f:
         dataset_cfg = json.load(f)
     infos_name = dataset_cfg.get('infos_name', 'infos.json')
     filter_volume = dataset_cfg.get('filter_volume', 0.0)

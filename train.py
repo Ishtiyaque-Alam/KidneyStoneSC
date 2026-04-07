@@ -86,7 +86,7 @@ def main(args, save_path):
         else:
             metrics_cla[k.__class__.__name__] = k
     # data
-    with open('configs/dataset.json', 'r', encoding='utf-8') as f:
+    with open('/kaggle/working/KidneyStoneSC/configs/dataset.json', 'r', encoding='utf-8') as f:
         dataset = json.load(f)
     data_dir = dataset['data_dir']
     infos_name = dataset['infos_name']
