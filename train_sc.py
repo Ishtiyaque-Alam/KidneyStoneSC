@@ -298,9 +298,9 @@ if __name__ == '__main__':
 
     # 将参数字典保存为 JSON 文件
     now = time.strftime('%y%m%d%H%M', time.localtime())
-    with open(f'./configs/training_config_{now}.json', 'w') as fp:
+    with open(f'/kaggle/working/KidneyStoneSC/configs/training_config_{now}.json', 'w') as fp:
         json.dump(args_dict, fp, indent=4)
 
-    print(f"Training configuration saved to training_config_{now}.json")
+    print(f"Training configuration saved to /kaggle/working/KidneyStoneSC/configs/training_config_{now}.json")
 
     main(opt)
